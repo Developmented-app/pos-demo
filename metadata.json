@@ -1,0 +1,6 @@
+{
+  "name": "AdminLTE POS & Bakong KHQR Panel",
+  "description": "A high-fidelity full-featured POS system and admin panel inspired by AdminLTE 3 / 4, with robust local database simulation and secure, scan-simulated KHQR Bakong payment integration.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
