@@ -117,7 +117,13 @@ export const DEFAULT_BAKONG_SETTINGS: BakongSettings = {
   invoicePrefix: "INV",
   receiptHeaderText: "Prasidh Food Outlet\nPhnom Penh, Cambodia",
   receiptFooterText: "Thank you for supporting Cambodian local businesses!\nExchange policy: 7 days with invoice.",
-  enableSoundAlerts: true
+  enableSoundAlerts: true,
+  telegramBotToken: "",
+  telegramChatId: "",
+  enableTelegramDailyReport: false,
+  telegramReportHour: 20, // 8:00 PM default
+  telegramReportMinute: 0,
+  telegramLastSentDate: ""
 };
 
 export const CATEGORIES = [

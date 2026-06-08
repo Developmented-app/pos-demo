@@ -9,6 +9,7 @@ import BakongSettingsPanel from "./components/BakongSettings";
 import BakongSimulator from "./components/BakongSimulator";
 import { Product, Order, Customer, BakongSettings } from "./types";
 import { DEFAULT_PRODUCTS, DEFAULT_CUSTOMERS, DEFAULT_BAKONG_SETTINGS } from "./data";
+import { generateDailyReportHTML, sendTelegramNotification } from "./utils/telegram";
 
 export default function App() {
   // 1. Initial local states (with localStorage hooks)
@@ -206,6 +207,69 @@ export default function App() {
     window.dispatchEvent(successEvent);
   };
 
+  // 4. Background scheduler to automatically compile and send Telegram Daily Reports
+  useEffect(() => {
+    const checkAndSendTelegramDailyReport = async () => {
+      // 1. Check if Telegram daily reports are enabled and credentials exist
+      if (
+        !settings.enableTelegramDailyReport ||
+        !settings.telegramBotToken ||
+        !settings.telegramChatId
+      ) {
+        return;
+      }
+
+      // 2. Determine target scheduled time
+      const targetHour = settings.telegramReportHour ?? 18;
+      const targetMinute = settings.telegramReportMinute ?? 0;
+      
+      const now = new Date();
+      const currentHour = now.getHours();
+      const currentMinute = now.getMinutes();
+      
+      const todayStr = now.toLocaleDateString("en-CA"); // YYYY-MM-DD
+      
+      // 3. Prevent duplicate sends for today
+      if (settings.telegramLastSentDate === todayStr) {
+        return;
+      }
+
+      // 4. Check if current time is after or equal to preferred scheduled time
+      const currentMinutesSinceMidnight = currentHour * 60 + currentMinute;
+      const targetMinutesSinceMidnight = targetHour * 60 + targetMinute;
+
+      if (currentMinutesSinceMidnight >= targetMinutesSinceMidnight) {
+        // Build and send the daily POS report
+        const reportText = generateDailyReportHTML(orders, products, settings, todayStr);
+        
+        console.log(`[Telegram Scheduler] Triggering automatic POS notification to chat ${settings.telegramChatId}...`);
+        
+        const response = await sendTelegramNotification(
+          settings.telegramBotToken,
+          settings.telegramChatId,
+          reportText
+        );
+        
+        if (response.success) {
+          console.log("[Telegram Scheduler] Automatic report delivered successfully!");
+          // Save last sent date state to prevent duplicates
+          setSettings(prev => ({
+            ...prev,
+            telegramLastSentDate: todayStr
+          }));
+        } else {
+          console.error(`[Telegram Scheduler] Automatic report failed: ${response.error}`);
+        }
+      }
+    };
+
+    // Run check upon mount / settings/orders loaded, and then every 30 seconds
+    checkAndSendTelegramDailyReport();
+    const intervalId = setInterval(checkAndSendTelegramDailyReport, 30000);
+
+    return () => clearInterval(intervalId);
+  }, [settings, orders, products]);
+
   return (
     <div className="flex h-screen overflow-hidden bg-gray-100 select-none">
       
@@ -285,6 +349,7 @@ export default function App() {
               categories={categories}
               setCategories={setCategories}
               onResetDatabase={handleResetDatabase}
+              orders={orders}
             />
           )}
 

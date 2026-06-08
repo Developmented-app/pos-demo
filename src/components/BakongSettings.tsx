@@ -24,9 +24,14 @@ import {
   Trash2,
   Search,
   FileText,
-  DollarSign
+  DollarSign,
+  Edit3,
+  Send,
+  Bell,
+  Clock
 } from "lucide-react";
-import { BakongSettings, Customer, Product } from "../types";
+import { BakongSettings, Customer, Product, Order } from "../types";
+import { generateDailyReportHTML, sendTelegramNotification } from "../utils/telegram";
 
 interface SettingsProps {
   settings: BakongSettings;
@@ -38,9 +43,10 @@ interface SettingsProps {
   categories: string[];
   setCategories: React.Dispatch<React.SetStateAction<string[]>>;
   onResetDatabase: () => void;
+  orders: Order[];
 }
 
-type ActiveTab = "credentials" | "customers" | "catalog" | "general";
+type ActiveTab = "credentials" | "customers" | "catalog" | "general" | "telegram";
 
 export default function BakongSettingsPanel({
   settings,
@@ -51,7 +57,8 @@ export default function BakongSettingsPanel({
   setCustomers,
   categories,
   setCategories,
-  onResetDatabase
+  onResetDatabase,
+  orders
 }: SettingsProps) {
   // Navigation sub-tab
   const [activeTab, setActiveTab] = useState<ActiveTab>("credentials");
@@ -72,9 +79,12 @@ export default function BakongSettingsPanel({
   const [custNote, setCustNote] = useState("");
   const [custOther, setCustOther] = useState("");
   const [custSearch, setCustSearch] = useState("");
+  const [editingCustomer, setEditingCustomer] = useState<Customer | null>(null);
 
   // State: Tab 3 - Product & Categories
   const [newCatName, setNewCatName] = useState("");
+  const [editingCategory, setEditingCategory] = useState<string | null>(null);
+  const [editCategoryVal, setEditCategoryVal] = useState<string>("");
   
   const [prodName, setProdName] = useState("");
   const [prodCat, setProdCat] = useState("");
@@ -93,6 +103,14 @@ export default function BakongSettingsPanel({
   const [receiptHeaderTxt, setReceiptHeaderTxt] = useState(settings.receiptHeaderText || "");
   const [receiptFooterTxt, setReceiptFooterTxt] = useState(settings.receiptFooterText || "");
   const [enableSound, setEnableSound] = useState(settings.enableSoundAlerts ?? true);
+
+  // State: Tab 5 - Telegram Bot Reporting Settings
+  const [tgBotToken, setTgBotToken] = useState(settings.telegramBotToken || "");
+  const [tgChatId, setTgChatId] = useState(settings.telegramChatId || "");
+  const [tgEnable, setTgEnable] = useState(settings.enableTelegramDailyReport ?? false);
+  const [tgHour, setTgHour] = useState<number>(settings.telegramReportHour ?? 18);
+  const [tgMinute, setTgMinute] = useState<number>(settings.telegramReportMinute ?? 0);
+  const [testSending, setTestSending] = useState(false);
 
   // Status indicators per submission action
   const [feedbackMsg, setFeedbackMsg] = useState<{ type: "success" | "error"; text: string } | null>(null);
@@ -130,7 +148,7 @@ export default function BakongSettingsPanel({
     }, 800);
   };
 
-  // 2. Submit New Customer
+  // 2. Submit New / Edit Customer
   const handleSaveCustomer = (e: React.FormEvent) => {
     e.preventDefault();
     if (!custName.trim() || !custPhone.trim()) {
@@ -141,17 +159,37 @@ export default function BakongSettingsPanel({
     setLoadingAction("customer");
 
     setTimeout(() => {
-      const newCustomer: Customer = {
-        id: `cust-${Date.now()}`,
-        name: custName.trim(),
-        phone: custPhone.trim(),
-        email: custEmail.trim() || undefined,
-        location: custLoc.trim() || undefined,
-        note: custNote.trim() || undefined,
-        other: custOther.trim() || undefined
-      };
+      if (editingCustomer) {
+        setCustomers(prev => prev.map(c => 
+          c.id === editingCustomer.id
+            ? {
+                ...c,
+                name: custName.trim(),
+                phone: custPhone.trim(),
+                email: custEmail.trim() || undefined,
+                location: custLoc.trim() || undefined,
+                note: custNote.trim() || undefined,
+                other: custOther.trim() || undefined
+              }
+            : c
+        ));
+        setEditingCustomer(null);
+        triggerFeedback(`Customer "${custName.trim()}" information up-to-date.`);
+      } else {
+        const newCustomer: Customer = {
+          id: `cust-${Date.now()}`,
+          name: custName.trim(),
+          phone: custPhone.trim(),
+          email: custEmail.trim() || undefined,
+          location: custLoc.trim() || undefined,
+          note: custNote.trim() || undefined,
+          other: custOther.trim() || undefined
+        };
 
-      setCustomers(prev => [...prev, newCustomer]);
+        setCustomers(prev => [...prev, newCustomer]);
+        triggerFeedback(`Registered user/customer "${newCustomer.name}" successfully into the POS register.`);
+      }
+
       setCustName("");
       setCustPhone("");
       setCustEmail("");
@@ -160,8 +198,27 @@ export default function BakongSettingsPanel({
       setCustOther("");
 
       setLoadingAction(null);
-      triggerFeedback(`Registered user/customer "${newCustomer.name}" successfully into the POS register.`);
     }, 600);
+  };
+
+  const handleStartEditCustomer = (c: Customer) => {
+    setEditingCustomer(c);
+    setCustName(c.name);
+    setCustPhone(c.phone);
+    setCustEmail(c.email || "");
+    setCustLoc(c.location || "");
+    setCustNote(c.note || "");
+    setCustOther(c.other || "");
+  };
+
+  const handleCancelEditCustomer = () => {
+    setEditingCustomer(null);
+    setCustName("");
+    setCustPhone("");
+    setCustEmail("");
+    setCustLoc("");
+    setCustNote("");
+    setCustOther("");
   };
 
   // Delete customer
@@ -172,6 +229,9 @@ export default function BakongSettingsPanel({
     }
     if (confirm(`Are you sure you want to remove "${name}" from customer lists?`)) {
       setCustomers(prev => prev.filter(c => c.id !== id));
+      if (editingCustomer?.id === id) {
+        handleCancelEditCustomer();
+      }
       triggerFeedback(`Deleted user "${name}" from local active indexers.`);
     }
   };
@@ -192,6 +252,46 @@ export default function BakongSettingsPanel({
     triggerFeedback(`Successfully added category: "${formattedCat}" to options.`);
   };
 
+  const handleStartEditCategory = (catToEdit: string) => {
+    setEditingCategory(catToEdit);
+    setEditCategoryVal(catToEdit);
+  };
+
+  const handleCancelEditCategory = () => {
+    setEditingCategory(null);
+    setEditCategoryVal("");
+  };
+
+  const handleSaveEditedCategory = (e: React.FormEvent) => {
+    e.preventDefault();
+    const formattedNewCat = editCategoryVal.trim();
+    if (!formattedNewCat || !editingCategory) return;
+
+    if (formattedNewCat.toLowerCase() === editingCategory.toLowerCase()) {
+      setEditingCategory(null);
+      return;
+    }
+
+    if (categories.some(cat => cat.toLowerCase() === formattedNewCat.toLowerCase() && cat !== editingCategory)) {
+      triggerFeedback(`Category "${formattedNewCat}" already exists.`, "error");
+      return;
+    }
+
+    // Update categories
+    setCategories(prev => prev.map(cat => cat === editingCategory ? formattedNewCat : cat));
+
+    // Update products with matching category
+    setProducts(prev => prev.map(p => 
+      p.category === editingCategory 
+        ? { ...p, category: formattedNewCat } 
+        : p
+    ));
+
+    triggerFeedback(`Category renamed from "${editingCategory}" to "${formattedNewCat}". Associated products refreshed.`);
+    setEditingCategory(null);
+    setEditCategoryVal("");
+  };
+
   // Delete Category
   const handleDeleteCategory = (catToDelete: string) => {
     if (["Main Dishes", "Beverages", "Groceries", "Snacks"].includes(catToDelete)) {
@@ -200,6 +300,9 @@ export default function BakongSettingsPanel({
     }
     if (confirm(`Are you sure you want to remove category "${catToDelete}"? Related products might fall back to general filter.`)) {
       setCategories(prev => prev.filter(cat => cat !== catToDelete));
+      if (editingCategory === catToDelete) {
+        handleCancelEditCategory();
+      }
       triggerFeedback(`Inbound category "${catToDelete}" deleted successfully.`);
     }
   };
@@ -274,6 +377,48 @@ export default function BakongSettingsPanel({
       setLoadingAction(null);
       triggerFeedback("General controls, invoice parameters, and receipt layout updated successfully!");
     }, 600);
+  };
+
+  // 6. Submit Telegram Bot Reporting Settings
+  const handleSaveTelegramSettings = (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoadingAction("telegram");
+
+    setTimeout(() => {
+      setSettings(prev => ({
+        ...prev,
+        telegramBotToken: tgBotToken.trim(),
+        telegramChatId: tgChatId.trim(),
+        enableTelegramDailyReport: tgEnable,
+        telegramReportHour: tgHour,
+        telegramReportMinute: tgMinute
+      }));
+      setLoadingAction(null);
+      triggerFeedback("Telegram Bot Reporting configurations updated and synchronized successfully!");
+    }, 600);
+  };
+
+  const handleSendTestReport = async () => {
+    if (!tgBotToken.trim() || !tgChatId.trim()) {
+      triggerFeedback("Please specify both a valid Telegram Bot Token and Chat ID to send a report.", "error");
+      return;
+    }
+    
+    setTestSending(true);
+    
+    const todayStr = new Date().toLocaleDateString('en-CA'); // YYYY-MM-DD
+    
+    // Compile and generate HTML message
+    const reportText = generateDailyReportHTML(orders, products, settings, todayStr);
+    
+    const res = await sendTelegramNotification(tgBotToken.trim(), tgChatId.trim(), reportText);
+    setTestSending(false);
+    
+    if (res.success) {
+      triggerFeedback("Success! Immediate daily POS summary report compiled and sent to your Telegram chat!");
+    } else {
+      triggerFeedback(`Telegram Delivery Failed: ${res.error}`, "error");
+    }
   };
 
   return (
@@ -361,6 +506,21 @@ export default function BakongSettingsPanel({
         >
           <Sliders className="w-4 h-4" />
           Control General (Print, Invoice, VAT)
+        </button>
+
+        <button
+          onClick={() => {
+            setActiveTab("telegram");
+            setFeedbackMsg(null);
+          }}
+          className={`py-2 px-4 text-xs font-bold font-sans flex items-center gap-2 border-b-2 whitespace-nowrap transition-all ${
+            activeTab === "telegram" 
+              ? "border-orange-500 text-orange-600 bg-white" 
+              : "border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300"
+          }`}
+        >
+          <Send className="w-4 h-4 text-[#0088cc]" />
+          Telegram Bot Reports
         </button>
       </div>
 
@@ -513,7 +673,7 @@ export default function BakongSettingsPanel({
           </>
         )}
 
-        {/* ======================= TAB 2: SETUP CUSTOMERS (Name, Phone, Location, Note, Other) ======================= */}
+               {/* ======================= TAB 2: SETUP CUSTOMERS (Name, Phone, Location, Note, Other) ======================= */}
         {activeTab === "customers" && (
           <>
             {/* Form Section */}
@@ -521,11 +681,22 @@ export default function BakongSettingsPanel({
               <div className="border-b border-slate-100 pb-2.5 flex items-center justify-between">
                 <h2 className="text-sm font-extrabold text-slate-800 uppercase tracking-wider font-sans flex items-center gap-2">
                   <UserPlus className="w-5 h-5 text-orange-500" />
-                  Register New Customer ("Customer or Other")
+                  {editingCustomer ? `Edit Customer Info: ${editingCustomer.name}` : `Register New Customer ("Customer or Other")`}
                 </h2>
-                <span className="text-[10px] font-mono bg-orange-50 border border-orange-100 text-orange-700 px-2 py-0.5 rounded font-black font-bold">
-                  User DB v1.2
-                </span>
+                <div className="flex items-center gap-2">
+                  {editingCustomer && (
+                    <button
+                      type="button"
+                      onClick={handleCancelEditCustomer}
+                      className="text-[11px] bg-amber-50 hover:bg-amber-100 border border-amber-200 text-amber-800 px-2 py-0.5 rounded font-bold"
+                    >
+                      Cancel Edit
+                    </button>
+                  )}
+                  <span className="text-[10px] font-mono bg-orange-50 border border-orange-100 text-orange-700 px-2 py-0.5 rounded font-black font-bold">
+                    User DB v1.2
+                  </span>
+                </div>
               </div>
 
               <form onSubmit={handleSaveCustomer} className="space-y-4">
@@ -601,11 +772,20 @@ export default function BakongSettingsPanel({
                   />
                 </div>
 
-                <div className="flex items-center justify-end">
+                <div className="flex items-center justify-end gap-2">
+                  {editingCustomer && (
+                    <button
+                      type="button"
+                      onClick={handleCancelEditCustomer}
+                      className="border border-gray-300 hover:bg-gray-100 font-bold text-xs text-slate-700 py-2.5 px-4 rounded-lg transition active:scale-95 cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                  )}
                   <button
                     type="submit"
                     disabled={loadingAction !== null}
-                    className="bg-[#28a745] hover:bg-[#218838] font-bold text-xs text-white py-2 px-6 rounded-lg shadow inline-flex items-center gap-1.5 transition active:scale-95 cursor-pointer disabled:opacity-50"
+                    className="bg-[#28a745] hover:bg-[#218838] font-bold text-xs text-white py-2.5 px-6 rounded-lg shadow inline-flex items-center gap-1.5 transition active:scale-95 cursor-pointer disabled:opacity-50"
                   >
                     {loadingAction === "customer" ? (
                       <>
@@ -615,7 +795,7 @@ export default function BakongSettingsPanel({
                     ) : (
                       <>
                         <UserPlus className="w-4 h-4" />
-                        <span>Register Customer user</span>
+                        <span>{editingCustomer ? "Save Customer Changes" : "Register Customer user"}</span>
                       </>
                     )}
                   </button>
@@ -678,15 +858,26 @@ export default function BakongSettingsPanel({
                         )}
                       </div>
 
-                      {c.id !== "cust-0" && (
+                      <div className="flex items-center gap-1 shrink-0 self-center">
                         <button
-                          onClick={() => handleDeleteCustomer(c.id, c.name)}
-                          className="text-gray-400 hover:text-rose-600 p-1 rounded-full hover:bg-white transition opacity-0 group-hover:opacity-100 focus:opacity-100 self-center"
-                          title="Remove user"
+                          type="button"
+                          onClick={() => handleStartEditCustomer(c)}
+                          className="text-gray-400 hover:text-blue-600 p-1 rounded-full hover:bg-white transition opacity-0 group-hover:opacity-100 focus:opacity-100 cursor-pointer"
+                          title="Edit user details"
                         >
-                          <Trash2 className="w-3.5 h-3.5" />
+                          <Edit3 className="w-3.5 h-3.5" />
                         </button>
-                      )}
+                        {c.id !== "cust-0" && (
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteCustomer(c.id, c.name)}
+                            className="text-gray-400 hover:text-rose-600 p-1 rounded-full hover:bg-white transition opacity-0 group-hover:opacity-100 focus:opacity-100 cursor-pointer"
+                            title="Remove user"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
                     </div>
                   ))
                 )}
@@ -708,24 +899,61 @@ export default function BakongSettingsPanel({
               </div>
 
               {/* Add category list */}
-              <form onSubmit={handleSaveCategory} className="flex gap-1.5 mt-2">
-                <input
-                  type="text"
-                  required
-                  placeholder="e.g. Seafood, Soups"
-                  value={newCatName}
-                  onChange={(e) => setNewCatName(e.target.value)}
-                  className="flex-1 border bg-white rounded-lg px-3 py-1.5 text-xs focus:ring-1 focus:ring-orange-500 outline-none font-sans font-bold text-slate-800"
-                />
-                
-                <button
-                  type="submit"
-                  className="bg-orange-500 hover:bg-orange-600 text-white p-2 rounded-lg transition active:scale-95"
-                  title="Submit Category"
-                >
-                  <Plus className="w-4 h-4" />
-                </button>
-              </form>
+              {editingCategory ? (
+                <form onSubmit={handleSaveEditedCategory} className="space-y-1.5 p-2 bg-indigo-50/50 border border-indigo-100 rounded-lg">
+                  <div className="flex justify-between items-center text-[10px] font-mono font-bold text-indigo-700">
+                    <span>RENAME CATEGORY: {editingCategory}</span>
+                    <button 
+                      type="button" 
+                      onClick={handleCancelEditCategory}
+                      className="text-gray-400 hover:text-gray-600 font-bold"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                  <div className="flex gap-1">
+                    <input
+                      type="text"
+                      required
+                      value={editCategoryVal}
+                      onChange={(e) => setEditCategoryVal(e.target.value)}
+                      className="flex-1 border bg-white rounded px-2 py-1 text-xs focus:ring-1 focus:ring-orange-500 outline-none font-sans font-bold text-slate-800"
+                    />
+                    <button
+                      type="submit"
+                      className="bg-emerald-500 hover:bg-emerald-600 text-white text-xs px-2.5 py-1 rounded font-bold transition active:scale-95 shrink-0 cursor-pointer"
+                    >
+                      Save
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleCancelEditCategory}
+                      className="bg-gray-200 hover:bg-gray-300 text-slate-700 text-xs px-2 py-1 rounded transition active:scale-95 shrink-0 cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </form>
+              ) : (
+                <form onSubmit={handleSaveCategory} className="flex gap-1.5 mt-2">
+                  <input
+                    type="text"
+                    required
+                    placeholder="e.g. Seafood, Soups"
+                    value={newCatName}
+                    onChange={(e) => setNewCatName(e.target.value)}
+                    className="flex-1 border bg-white rounded-lg px-3 py-1.5 text-xs focus:ring-1 focus:ring-orange-500 outline-none font-sans font-bold text-slate-800"
+                  />
+                  
+                  <button
+                    type="submit"
+                    className="bg-orange-500 hover:bg-orange-600 text-white p-2 rounded-lg transition active:scale-95 cursor-pointer"
+                    title="Submit Category"
+                  >
+                    <Plus className="w-4 h-4" />
+                  </button>
+                </form>
+              )}
 
               {/* Categories list tags */}
               <div className="space-y-1.5 pt-2 select-text">
@@ -742,12 +970,20 @@ export default function BakongSettingsPanel({
                             : "bg-indigo-50 text-indigo-700 border-indigo-200"
                         }`}
                       >
-                        {cat}
+                        <span>{cat}</span>
+                        <button
+                          type="button"
+                          onClick={() => handleStartEditCategory(cat)}
+                          className="hover:text-indigo-900 text-slate-400 p-0.5 cursor-pointer"
+                          title={`Rename category "${cat}"`}
+                        >
+                          <Edit3 className="w-3 h-3" />
+                        </button>
                         {!isSystem && (
                           <button
                             type="button"
                             onClick={() => handleDeleteCategory(cat)}
-                            className="bg-red-200 text-red-800 hover:bg-red-800 hover:text-white rounded-full w-3.5 h-3.5 text-[8px] flex items-center justify-center leading-none"
+                            className="bg-red-100 text-red-700 hover:bg-red-700 hover:text-white rounded-full w-3.5 h-3.5 text-[8.5px] flex items-center justify-center leading-none font-bold cursor-pointer"
                             title="Delete category tag"
                           >
                             ×
@@ -1094,6 +1330,198 @@ export default function BakongSettingsPanel({
                 <div>
                   <strong className="text-gray-700 block">✓ 80mm Custom fitting</strong>
                   Fits perfectly within a standard 80mm roll width. Avoids horizontal clipping.
+                </div>
+              </div>
+            </div>
+          </>
+        )}
+
+        {/* ======================= TAB 5: TELEGRAM NOTIFICATIONS & REPORTING ======================= */}
+        {activeTab === "telegram" && (
+          <>
+            <div className="lg:col-span-8 bg-white border border-gray-200 rounded-xl p-5 shadow-sm space-y-4">
+              <div className="border-b border-gray-100 pb-2.5 flex items-center justify-between">
+                <h2 className="text-sm font-extrabold text-slate-800 uppercase tracking-wider font-sans flex items-center gap-2">
+                  <Send className="w-4 h-4 text-[#0088cc]" />
+                  Telegram Bot Notification Routing Engine
+                </h2>
+                <span className="text-[10px] border px-2 py-0.5 rounded bg-sky-50 font-mono text-sky-700 font-bold leading-none">
+                  Telegram Bot API v3.0
+                </span>
+              </div>
+
+              <form onSubmit={handleSaveTelegramSettings} className="space-y-4">
+                
+                {/* Bot Token & Chat ID */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest block font-mono">Telegram Bot Token *</label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="e.g. 123456789:ABCdefGhIJKlm..."
+                      value={tgBotToken}
+                      onChange={(e) => setTgBotToken(e.target.value)}
+                      className="w-full border bg-white rounded-lg px-2.5 py-2 text-xs font-mono focus:ring-1 focus:ring-orange-500 mt-1.5 text-slate-800"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest block font-mono">Telegram Target Chat ID / Group ID *</label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="e.g. 987654321 (-100... for groups)"
+                      value={tgChatId}
+                      onChange={(e) => setTgChatId(e.target.value)}
+                      className="w-full border bg-white rounded-lg px-2.5 py-2 text-xs font-mono focus:ring-1 focus:ring-orange-500 mt-1.5 text-slate-800"
+                    />
+                  </div>
+                </div>
+
+                {/* Subheading for Automated Scheduling */}
+                <div className="border-t border-dashed border-gray-100 pt-3 flex items-center gap-2">
+                  <Clock className="w-4 h-4 text-orange-500" />
+                  <span className="text-[11px] font-bold text-slate-700 uppercase tracking-wider font-sans">Automated Daily Report Schedule</span>
+                </div>
+
+                <div className="bg-slate-50/50 border border-slate-100 rounded-xl p-4 space-y-3">
+                  {/* Enable Switch */}
+                  <div className="flex items-center gap-2">
+                    <input
+                      id="bgTelegramScheduleCheckbox"
+                      type="checkbox"
+                      checked={tgEnable}
+                      onChange={(e) => setTgEnable(e.target.checked)}
+                      className="w-4 h-4 cursor-pointer accent-orange-500"
+                    />
+                    <label htmlFor="bgTelegramScheduleCheckbox" className="text-xs font-bold text-slate-700 cursor-pointer select-none">
+                      📅 Enable Automated Daily Report Submission
+                    </label>
+                  </div>
+                  
+                  <p className="text-[10.5px] text-gray-400 font-sans leading-relaxed">
+                    When enabled, the POS register will automatically generate today's sales breakdown, top items sold, and low-inventory notices, then route them to the specified Telegram ID once per day at the designated hour. (Triggers immediately upon admin activity at/after the scheduled hour).
+                  </p>
+
+                  {/* Scheduled Time Selects */}
+                  {tgEnable && (
+                    <div className="flex items-center gap-3 pt-1 select-none">
+                      <span className="text-xs text-slate-500 font-semibold font-mono">Preferred Time (Every Day):</span>
+                      <div className="flex items-center gap-1.5">
+                        <select
+                          value={tgHour || 18}
+                          onChange={(e) => setTgHour(parseInt(e.target.value))}
+                          className="border bg-white text-xs font-bold font-mono text-slate-700 rounded px-2 py-1 outline-none focus:ring-1 focus:ring-orange-500 cursor-pointer"
+                        >
+                          {Array.from({ length: 24 }).map((_, h) => (
+                            <option key={h} value={h}>
+                              {String(h).padStart(2, "0")}
+                            </option>
+                          ))}
+                        </select>
+                        <span className="text-xs font-bold text-slate-400 font-mono">:</span>
+                        <select
+                          value={tgMinute || 0}
+                          onChange={(e) => setTgMinute(parseInt(e.target.value))}
+                          className="border bg-white text-xs font-bold font-mono text-slate-700 rounded px-2 py-1 outline-none focus:ring-1 focus:ring-orange-500 cursor-pointer"
+                        >
+                          {Array.from({ length: 12 }).map((_, m) => {
+                            const minVal = m * 5;
+                            return (
+                              <option key={minVal} value={minVal}>
+                                {String(minVal).padStart(2, "0")}
+                              </option>
+                            );
+                          })}
+                        </select>
+                        <span className="text-[10.5px] bg-orange-50 border border-orange-100 text-orange-700 px-2 py-0.5 rounded font-bold uppercase tracking-wider font-mono">
+                          {tgHour >= 12 ? "PM" : "AM"}
+                        </span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Save and Test trigger Buttons */}
+                <div className="flex flex-wrap items-center justify-between border-t border-slate-100 pt-3 gap-2">
+                  <button
+                    type="button"
+                    onClick={handleSendTestReport}
+                    disabled={testSending || !tgBotToken.trim() || !tgChatId.trim()}
+                    className="border border-blue-200 bg-blue-50/50 hover:bg-blue-50 text-blue-800 hover:text-blue-900 font-black text-xs py-2 px-4 rounded-lg flex items-center gap-1.5 transition active:scale-95 cursor-pointer disabled:opacity-50"
+                  >
+                    {testSending ? (
+                      <>
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin text-blue-600" />
+                        <span>Fulfilling instant routing request...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Send className="w-3.5 h-3.5 text-[#0088cc]" />
+                        <span>Send Today's Report Now</span>
+                      </>
+                    )}
+                  </button>
+
+                  <button
+                    type="submit"
+                    disabled={loadingAction !== null}
+                    className="bg-emerald-600 hover:bg-emerald-700 font-bold text-xs text-white py-2 px-6 rounded-lg shadow inline-flex items-center gap-1.5 transition active:scale-95 cursor-pointer"
+                  >
+                    {loadingAction === "telegram" ? (
+                      <>
+                        <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                        <span>Synchronizing configurations...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Sliders className="w-4 h-4" />
+                        <span>Save Telegram Settings</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </form>
+            </div>
+
+            {/* Telegram setup tutorial helper sidebar */}
+            <div className="lg:col-span-4 bg-white border border-gray-200 rounded-xl p-5 shadow-sm space-y-4">
+              <div className="border-b pb-2">
+                <h3 className="text-xs font-bold text-slate-800 uppercase tracking-widest font-mono flex items-center gap-1.5">
+                  <Bell className="w-4 h-4 text-orange-500" />
+                  Bot Setup Instructions
+                </h3>
+              </div>
+              
+              <div className="text-xs text-slate-500 space-y-3 leading-relaxed">
+                <p>
+                  To receive daily store summaries inside your Telegram account or channel, follow these straightforward steps:
+                </p>
+
+                <ol className="list-decimal list-inside space-y-2 border-l-2 border-slate-100 pl-2 text-slate-600">
+                  <li>
+                    Search for <strong>@BotFather</strong> on Telegram and send message: <code className="bg-slate-50 text-rose-600 px-1 py-0.5 rounded">/newbot</code>.
+                  </li>
+                  <li>
+                    Proceed through the bot setup to generate your unique <strong>Bot Token</strong>.
+                  </li>
+                  <li>
+                    Open your new bot in Telegram and hit <strong>Start</strong> to allow standard message reception.
+                  </li>
+                  <li>
+                    Message <strong>@userinfobot</strong> to instantly fetch your exact <strong>Chat ID</strong> numeric integer.
+                  </li>
+                  <li>
+                    For collective alerts, add your bot to a group/channel and input the group's ID (which generally starts with <code className="bg-slate-50 px-1 rounded">-100</code>).
+                  </li>
+                </ol>
+
+                <div className="bg-emerald-50 border border-emerald-100 text-[11px] leading-relaxed text-emerald-800 p-3 rounded-lg flex items-start gap-1.5 font-sans font-medium">
+                  <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                  <span>
+                    Once configured, you will receive real-time financial tracking, audit sheets, and critical low-stock alerts straight to your cellular or desktop device, every day!
+                  </span>
                 </div>
               </div>
             </div>

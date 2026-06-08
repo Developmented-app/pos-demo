@@ -68,6 +68,12 @@ export interface BakongSettings {
   receiptHeaderText?: string;
   receiptFooterText?: string;
   enableSoundAlerts?: boolean;
+  telegramBotToken?: string;
+  telegramChatId?: string;
+  enableTelegramDailyReport?: boolean;
+  telegramReportHour?: number;
+  telegramReportMinute?: number;
+  telegramLastSentDate?: string;
 }
 
 export interface HoldCart {
